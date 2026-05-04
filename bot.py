@@ -15,11 +15,13 @@ def run_web():
     port = int(os.environ.get("PORT", 8080))
     web.run(host="0.0.0.0", port=port)
 
-# chạy web nền
 threading.Thread(target=run_web, daemon=True).start()
 
 # ================= BOT =================
 TOKEN = os.getenv("TOKEN")
+
+if not TOKEN:
+    raise Exception("Missing TOKEN in environment variables")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot đang chạy ok")
