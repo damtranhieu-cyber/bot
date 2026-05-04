@@ -1,7 +1,10 @@
-from flask import Flask
-import threading
 import os
+import threading
+from flask import Flask
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# ================= WEB =================
 web = Flask(__name__)
 
 @web.route("/")
@@ -12,9 +15,22 @@ def run_web():
     port = int(os.environ.get("PORT", 8080))
     web.run(host="0.0.0.0", port=port)
 
-t = threading.Thread(target=run_web)
-t.daemon = True
-t.start()
+# chạy web nền
+threading.Thread(target=run_web, daemon=True).start()
+
+# ================= BOT =================
+TOKEN = os.getenv("TOKEN")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot đang chạy ok")
+
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+
+print("BOT STARTED")
+
+app.run_polling()
 import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
