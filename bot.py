@@ -20,7 +20,7 @@ import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = "7851919493:AAEizhjlhQFUuo6QlM06T70fgTfJbHCqi6I"
+TOKEN = os.getenv("TOKEN")  # 👈 ở đây
 ADMIN_ID = 5818758277  # 👈 ID của bạn (dùng /id để lấy)
 
 spamming = False
