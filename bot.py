@@ -32,8 +32,6 @@ app.add_handler(CommandHandler("start", start))
 
 print("BOT STARTED")
 
-app.run_polling()
-
 TOKEN = os.getenv("TOKEN")  # 👈 ở đây
 ADMIN_ID = 5818758277  # 👈 ID của bạn (dùng /id để lấy)
 
