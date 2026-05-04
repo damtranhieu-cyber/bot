@@ -31,9 +31,6 @@ app.add_handler(CommandHandler("start", start))
 print("BOT STARTED")
 
 app.run_polling()
-import asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TOKEN")  # 👈 ở đây
 ADMIN_ID = 5818758277  # 👈 ID của bạn (dùng /id để lấy)
