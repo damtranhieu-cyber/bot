@@ -12,7 +12,24 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from flask import Flask
+from threading import Thread
+from telegram.ext import Application
 
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "OK"
+
+def web():
+    app.run(host="0.0.0.0", port=8080)
+
+Thread(target=web).start()
+
+# bot telegram chạy dưới đây
+# app = Application.builder().token("TOKEN").build()
+# app.run_polling()
 # ==================================================
 # CONFIG
 # ==================================================
