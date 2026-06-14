@@ -292,6 +292,35 @@ def save_song(name, msg_id, gid, username):
     sync_db()
     return True
 
+def add_alias(song_id, alias):
+    alias = clean_name(alias)
+    if not alias:
+        return False
+    cur.execute("SELECT 1 FROM aliases WHERE song_id=? AND alias=?", (song_id, alias))
+    if cur.fetchone():
+        return False
+    cur.execute("INSERT INTO aliases(song_id, alias) VALUES (?, ?)", (song_id, alias))
+    db.commit()
+    sync_db()
+    return True
+
+def remove_alias(song_id, alias):
+    alias = clean_name(alias)
+    cur.execute("DELETE FROM aliases WHERE song_id=? AND alias=?", (song_id, alias))
+    deleted = cur.rowcount > 0
+    db.commit()
+    if deleted:
+        sync_db()
+    return deleted
+
+def get_aliases(song_id):
+    cur.execute("SELECT alias FROM aliases WHERE song_id=? ORDER BY alias", (song_id,))
+    return [r[0] for r in cur.fetchall()]
+
+def get_song_by_id(song_id):
+    cur.execute("SELECT id, name, message_id, source_username FROM songs WHERE id=?", (song_id,))
+    return cur.fetchone()
+
 def search_songs(query, offset=0, limit=10):
     q = clean_name(query)
     cur.execute("""
@@ -685,6 +714,7 @@ async def getdb(update, context):
     if not is_owner(update):
         return
     try:
+        # Make sure Drive has the latest copy before sharing the link
         upload_db(DB_PATH)
         link = get_db_link()
         if link:
@@ -697,6 +727,38 @@ async def getdb(update, context):
             await update.message.reply_document(document=open(DB_PATH, "rb"))
     except Exception as e:
         await update.message.reply_text(f"❌ Lỗi: {e}")
+
+async def restoredb(update, context):
+    if not is_owner(update):
+        return
+    global db, cur
+    try:
+        await update.message.reply_text("⏳ Đang tải DB mới nhất từ Google Drive...")
+
+        ok = download_db(DB_PATH)
+        if not ok:
+            return await update.message.reply_text(
+                "⚠️ Không tìm thấy DB trên Drive hoặc Drive chưa được cấu hình."
+            )
+
+        # Close old connection and reopen with the restored file
+        try:
+            db.close()
+        except Exception:
+            pass
+
+        db = sqlite3.connect(DB_PATH, check_same_thread=False)
+        cur = db.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM songs")
+        songs = cur.fetchone()[0]
+
+        await update.message.reply_text(
+            f"✅ Đã khôi phục DB từ Google Drive.\n🎵 Tổng số bài hát: <b>{songs}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Lỗi khi khôi phục DB: {e}")
 
 async def settopic(update, context):
     if not is_owner(update):
@@ -723,6 +785,78 @@ async def deltrack(update, context):
         await update.message.reply_text(f"🗑️ Đã xóa bài hát ID: <b>{song_id}</b>", parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ Lỗi: {e}")
+
+async def addalias(update, context):
+    if not is_owner(update):
+        return
+    text = update.message.text.replace("/addalias ", "", 1).strip()
+    if "|" not in text:
+        return await update.message.reply_text(
+            "ℹ️ Cú pháp: <code>/addalias &lt;ID bài hát&gt; | &lt;bí danh&gt;</code>",
+            parse_mode="HTML",
+        )
+    id_part, alias_part = text.split("|", 1)
+    try:
+        song_id = int(id_part.strip())
+    except ValueError:
+        return await update.message.reply_text("❌ ID bài hát không hợp lệ")
+
+    song = get_song_by_id(song_id)
+    if not song:
+        return await update.message.reply_text(f"❌ Không tìm thấy bài hát ID: {song_id}")
+
+    alias = alias_part.strip()
+    if add_alias(song_id, alias):
+        await update.message.reply_text(
+            f"✅ Đã thêm bí danh <b>{pretty_text(clean_name(alias))}</b> cho bài <b>{pretty_text(song[1])}</b> (ID {song_id})",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text("⚠️ Bí danh không hợp lệ hoặc đã tồn tại")
+
+async def delalias(update, context):
+    if not is_owner(update):
+        return
+    text = update.message.text.replace("/delalias ", "", 1).strip()
+    if "|" not in text:
+        return await update.message.reply_text(
+            "ℹ️ Cú pháp: <code>/delalias &lt;ID bài hát&gt; | &lt;bí danh&gt;</code>",
+            parse_mode="HTML",
+        )
+    id_part, alias_part = text.split("|", 1)
+    try:
+        song_id = int(id_part.strip())
+    except ValueError:
+        return await update.message.reply_text("❌ ID bài hát không hợp lệ")
+
+    if remove_alias(song_id, alias_part.strip()):
+        await update.message.reply_text("✅ Đã xóa bí danh", parse_mode="HTML")
+    else:
+        await update.message.reply_text("⚠️ Không tìm thấy bí danh đó")
+
+async def aliases_cmd(update, context):
+    if not context.args:
+        return await update.message.reply_text(
+            "ℹ️ Cú pháp: <code>/aliases &lt;ID bài hát&gt;</code>",
+            parse_mode="HTML",
+        )
+    try:
+        song_id = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text("❌ ID bài hát không hợp lệ")
+
+    song = get_song_by_id(song_id)
+    if not song:
+        return await update.message.reply_text(f"❌ Không tìm thấy bài hát ID: {song_id}")
+
+    aliases = get_aliases(song_id)
+    text = f"🎵 <b>{pretty_text(song[1])}</b> (ID {song_id})\n\n"
+    if aliases:
+        text += "🏷️ <b>Bí danh:</b>\n" + "\n".join(f"• {pretty_text(a)}" for a in aliases)
+    else:
+        text += "📭 Chưa có bí danh nào."
+    await update.message.reply_text(text, parse_mode="HTML")
+
 
 async def topnhac(update, context):
     cur.execute("SELECT query, count FROM top_searches ORDER BY count DESC LIMIT 10")
@@ -808,6 +942,37 @@ async def listsources(update, context):
         text += "📭 Không có source phụ nào."
     await update.message.reply_text(text, parse_mode="HTML")
 
+async def broadcast(update, context):
+    if not is_owner(update):
+        return
+
+    text = update.message.text.replace("/broadcast ", "", 1).strip()
+    if not text or text == "/broadcast":
+        return await update.message.reply_text(
+            "ℹ️ Cú pháp: <code>/broadcast &lt;nội dung&gt;</code>",
+            parse_mode="HTML",
+        )
+
+    targets = set(get_allowed_groups())
+    targets.add(MAIN_SOURCE_GROUP)
+
+    msg_text = f"📢 <b>THÔNG BÁO</b>\n\n{text}"
+
+    sent = 0
+    failed = 0
+    for gid in targets:
+        try:
+            await context.bot.send_message(chat_id=gid, text=msg_text, parse_mode="HTML")
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"[BROADCAST] Failed for {gid}: {e}")
+
+    await update.message.reply_text(
+        f"✅ Đã gửi tới <b>{sent}</b> group" + (f", thất bại <b>{failed}</b>" if failed else ""),
+        parse_mode="HTML",
+    )
+
 async def stats(update, context):
     if not is_owner(update):
         return
@@ -876,11 +1041,15 @@ app.job_queue.run_repeating(periodic_sync_job, interval=300, first=300)
 app.add_handler(CommandHandler("timtrack", timtrack))
 app.add_handler(CommandHandler("myplaylist", myplaylist))
 app.add_handler(CommandHandler("dashboard", dashboard_cmd))
+app.add_handler(CommandHandler("aliases", aliases_cmd))
 
 # Owner commands
 app.add_handler(CommandHandler("getdb", getdb))
+app.add_handler(CommandHandler("restoredb", restoredb))
 app.add_handler(CommandHandler("settopic", settopic))
 app.add_handler(CommandHandler("deltrack", deltrack))
+app.add_handler(CommandHandler("addalias", addalias))
+app.add_handler(CommandHandler("delalias", delalias))
 app.add_handler(CommandHandler("topnhac", topnhac))
 app.add_handler(CommandHandler("allowgroup", allowgroup))
 app.add_handler(CommandHandler("removegroup", removegroup))
@@ -889,6 +1058,7 @@ app.add_handler(CommandHandler("addsource", addsource))
 app.add_handler(CommandHandler("removesource", removesource))
 app.add_handler(CommandHandler("listsources", listsources))
 app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CommandHandler("broadcast", broadcast))
 
 # Other handlers
 app.add_handler(InlineQueryHandler(inline_query_handler))
