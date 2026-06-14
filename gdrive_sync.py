@@ -42,7 +42,37 @@ def _find_file_id(service, filename):
     files = res.get("files", [])
     return files[0]["id"] if files else None
 
+def get_db_link(filename="music.db"):
+    """Return a shareable Drive link for the DB file, or None if unavailable."""
+    service = _get_service()
+    if not service or not GDRIVE_FOLDER_ID:
+        return None
 
+    try:
+        query = f"name='{filename}' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false"
+        res = service.files().list(
+            q=query, spaces="drive",
+            fields="files(id, webViewLink, webContentLink)"
+        ).execute()
+        files = res.get("files", [])
+        if not files:
+            return None
+
+        file_id = files[0]["id"]
+
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={"role": "reader", "type": "anyone"},
+            ).execute()
+        except Exception as e:
+            print("[GDRIVE] permission set failed:", e)
+
+        return files[0].get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+    except Exception as e:
+        print("[GDRIVE] get_db_link failed:", e)
+        return None
+        
 def download_db(local_path, filename="music.db"):
     """Download the DB from Drive to local_path if it exists. Safe to call at startup."""
     service = _get_service()
