@@ -1,5 +1,5 @@
-python-telegram-bot==21.6
-flask
-python-telegram-bot
-google-api-python-client
-google-auth
+python-telegram-bot[job-queue]==21.6
+flask==3.0.3
+google-api-python-client==2.140.0
+google-auth==2.32.0
+ 
