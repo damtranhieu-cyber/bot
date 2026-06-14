@@ -27,7 +27,7 @@ from telegram.ext import (
     filters,
 )
 
-from gdrive_sync import download_db, upload_db
+from gdrive_sync import download_db, upload_db, get_db_link
 
 # =========================
 # KEEP ALIVE
@@ -685,7 +685,16 @@ async def getdb(update, context):
     if not is_owner(update):
         return
     try:
-        await update.message.reply_document(document=open(DB_PATH, "rb"))
+        upload_db(DB_PATH)
+        link = get_db_link()
+        if link:
+            await update.message.reply_text(
+                f"📦 <b>Database (Google Drive):</b>\n🔗 {html.escape(link)}",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        else:
+            await update.message.reply_document(document=open(DB_PATH, "rb"))
     except Exception as e:
         await update.message.reply_text(f"❌ Lỗi: {e}")
 
