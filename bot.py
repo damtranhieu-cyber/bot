@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS songs(
 );
 
 CREATE TABLE IF NOT EXISTS topic_links(
-    keyword TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT,
     link TEXT
 );
 
@@ -103,6 +104,25 @@ CREATE TABLE IF NOT EXISTS playlists(
 );
 """)
 db.commit()
+
+# Migration: old topic_links had `keyword TEXT PRIMARY KEY` (1 link per keyword).
+# New schema allows multiple links per keyword via an `id` autoincrement PK.
+cur.execute("PRAGMA table_info(topic_links)")
+_cols = cur.fetchall()
+_has_id = any(c[1] == "id" for c in _cols)
+if _cols and not _has_id:
+    cur.executescript("""
+        ALTER TABLE topic_links RENAME TO topic_links_old;
+        CREATE TABLE topic_links(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT,
+            link TEXT
+        );
+        INSERT INTO topic_links(keyword, link) SELECT keyword, link FROM topic_links_old;
+        DROP TABLE topic_links_old;
+    """)
+    db.commit()
+    print("[MIGRATION] topic_links upgraded to multi-link schema")
 
 def sync_db():
     """Push current DB file to Google Drive in a background thread (non-blocking)."""
@@ -969,6 +989,19 @@ async def listsources(update, context):
         text += "📭 Không có source phụ nào."
     await update.message.reply_text(text, parse_mode="HTML")
 
+async def listtopics(update, context):
+    if not is_owner(update):
+        return
+    cur.execute("SELECT keyword, link FROM topic_links ORDER BY keyword")
+    rows = cur.fetchall()
+    if not rows:
+        return await update.message.reply_text("📭 Chưa có topic nào được gán.", parse_mode="HTML")
+
+    text = "📌 <b>DANH SÁCH TOPIC</b>\n\n"
+    for kw, link in rows:
+        text += f"• <b>{pretty_text(kw)}</b> → <a href=\"{html.escape(link)}\">Xem topic</a>\n"
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
 async def broadcast(update, context):
     if not is_owner(update):
         return
@@ -1020,7 +1053,8 @@ async def ownerhelp(update, context):
         "/settopic &lt;từ khóa&gt; | &lt;link&gt; — Gán từ khóa vào topic\n"
         "/addsource &lt;group_id&gt; [topic_id] — Thêm nguồn lấy nhạc\n"
         "/removesource &lt;group_id&gt; [topic_id] — Xóa nguồn\n"
-        "/listsources — Danh sách nguồn\n\n"
+        "/listsources — Danh sách nguồn\n"
+        "/listtopics — Danh sách topic đã gán\n\n"
 
         "🛡️ <b>Group</b>\n"
         "/allowgroup &lt;group_id&gt; — Cấp quyền group\n"
@@ -1120,6 +1154,7 @@ app.add_handler(CommandHandler("listgroups", listgroups))
 app.add_handler(CommandHandler("addsource", addsource))
 app.add_handler(CommandHandler("removesource", removesource))
 app.add_handler(CommandHandler("listsources", listsources))
+app.add_handler(CommandHandler("listtopics", listtopics))
 app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("broadcast", broadcast))
 app.add_handler(CommandHandler("ownerhelp", ownerhelp))
