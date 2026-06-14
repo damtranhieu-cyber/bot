@@ -604,42 +604,42 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data[0] == "page":
-    page = int(data[1])
-    search_query = data[2]
-    limit = 5
-    offset = page * limit
+        page = int(data[1])
+        search_query = data[2]
+        limit = 5
+        offset = page * limit
+    
+        total = count_songs(search_query)
+        rows = search_songs(search_query, limit)
 
-    total = count_songs(search_query)
-    rows = search_songs(search_query, limit)
+        text = [f"🎵 <b>Kết quả:</b> {search_query}\n📊 Trang {page+1}"]
 
-    text = [f"🎵 <b>Kết quả:</b> {search_query}\n📊 Trang {page+1}"]
+        keyboard = []
+    
+        for i, (sid, name, mid, user) in enumerate(rows, 1):
+            text.append(f"🎶 {i}. {name}")
+            keyboard.append(
+                InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
+            )
 
-    keyboard = []
+        nav_buttons = build_pagination_buttons(page, total, search_query, limit)
 
-    for i, (sid, name, mid, user) in enumerate(rows, 1):
-        text.append(f"🎶 {i}. {name}")
-        keyboard.append(
-            InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
+        final_keyboard = []
+
+        if keyboard:
+            final_keyboard.append(keyboard)
+
+        if nav_buttons:
+            final_keyboard.extend(nav_buttons)
+
+        await q.edit_message_text(
+            "\n".join(text),
+            reply_markup=InlineKeyboardMarkup(final_keyboard),
+            parse_mode="HTML"
         )
 
-    nav_buttons = build_pagination_buttons(page, total, search_query, limit)
-
-    final_keyboard = []
-
-    if keyboard:
-        final_keyboard.append(keyboard)
-
-    if nav_buttons:
-        final_keyboard.extend(nav_buttons)
-
-    await q.edit_message_text(
-        "\n".join(text),
-        reply_markup=InlineKeyboardMarkup(final_keyboard),
-        parse_mode="HTML"
-    )
-
-    await q.answer()
-    return
+        await q.answer()
+        return
 
 # =========================
 # OWNER COMMANDS
