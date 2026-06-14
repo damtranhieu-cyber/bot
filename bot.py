@@ -973,6 +973,42 @@ async def broadcast(update, context):
         parse_mode="HTML",
     )
 
+async def ownerhelp(update, context):
+    if not is_owner(update):
+        return
+
+    text = (
+        "🛠️ <b>OWNER COMMANDS</b>\n\n"
+
+        "📦 <b>Database</b>\n"
+        "/getdb — Lấy link/file database\n"
+        "/restoredb — Khôi phục DB mới nhất từ Google Drive\n\n"
+
+        "🎵 <b>Bài hát</b>\n"
+        "/deltrack &lt;ID&gt; — Xóa bài hát\n"
+        "/addalias &lt;ID&gt; | &lt;bí danh&gt; — Thêm bí danh tìm kiếm\n"
+        "/delalias &lt;ID&gt; | &lt;bí danh&gt; — Xóa bí danh\n\n"
+
+        "📁 <b>Topic / Source</b>\n"
+        "/settopic &lt;từ khóa&gt; | &lt;link&gt; — Gán từ khóa vào topic\n"
+        "/addsource &lt;group_id&gt; [topic_id] — Thêm nguồn lấy nhạc\n"
+        "/removesource &lt;group_id&gt; [topic_id] — Xóa nguồn\n"
+        "/listsources — Danh sách nguồn\n\n"
+
+        "🛡️ <b>Group</b>\n"
+        "/allowgroup &lt;group_id&gt; — Cấp quyền group\n"
+        "/removegroup &lt;group_id&gt; — Bỏ quyền group\n"
+        "/listgroups — Danh sách group được cấp quyền\n\n"
+
+        "📊 <b>Thống kê &amp; thông báo</b>\n"
+        "/stats — Thống kê bot\n"
+        "/topnhac — Top từ khóa tìm kiếm\n"
+        "/broadcast &lt;nội dung&gt; — Gửi thông báo tới tất cả group\n\n"
+
+        "ℹ️ /ownerhelp — Hiện danh sách này"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
 async def stats(update, context):
     if not is_owner(update):
         return
@@ -1059,6 +1095,7 @@ app.add_handler(CommandHandler("removesource", removesource))
 app.add_handler(CommandHandler("listsources", listsources))
 app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("broadcast", broadcast))
+app.add_handler(CommandHandler("ownerhelp", ownerhelp))
 
 # Other handlers
 app.add_handler(InlineQueryHandler(inline_query_handler))
