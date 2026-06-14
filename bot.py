@@ -289,6 +289,7 @@ def save_song(name, msg_id, gid, username):
         (name, msg_id, gid, username),
     )
     db.commit()
+    sync_db()
     return True
 
 def search_songs(query, offset=0, limit=10):
@@ -709,6 +710,7 @@ async def deltrack(update, context):
         cur.execute("DELETE FROM aliases WHERE song_id=?", (song_id,))
         cur.execute("DELETE FROM playlists WHERE song_id=?", (song_id,))
         db.commit()
+        sync_db()
         await update.message.reply_text(f"🗑️ Đã xóa bài hát ID: <b>{song_id}</b>", parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ Lỗi: {e}")
@@ -845,12 +847,21 @@ async def error_handler(update, context):
         print(tb_string)
 
 # =========================
+# PERIODIC GDRIVE SYNC
+# =========================
+async def periodic_sync_job(context: ContextTypes.DEFAULT_TYPE):
+    sync_db()
+
+# =========================
 # RUN
 # =========================
 thread = Thread(target=run_web, daemon=True)
 thread.start()
 
 app = ApplicationBuilder().token(TOKEN).build()
+
+# Periodic sync every 5 minutes
+app.job_queue.run_repeating(periodic_sync_job, interval=300, first=300)
 
 # User commands
 app.add_handler(CommandHandler("timtrack", timtrack))
