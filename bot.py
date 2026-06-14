@@ -593,12 +593,16 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     rows = search_songs(query, offset=offset, limit=limit)
 
-    text = [f"🎵 <b>Kết quả:</b> {query}\n📊 Tổng: {total} bài\n"]
+    text = [f"🎵 <b>Kết quả:</b> {pretty_text(query)}\n📊 Tổng: {total} bài\n"]
 
     keyboard = []
 
     for i, (sid, name, mid, user) in enumerate(rows, 1):
-        text.append(f"🎶 {i}. {name}")
+        link = build_stream_link(user, mid)
+        if link:
+            text.append(f"🎶 <b>{i}.</b> {pretty_text(name)}\n🔗 <a href=\"{html.escape(link)}\">Nghe bài này</a>")
+        else:
+            text.append(f"🎶 <b>{i}.</b> {pretty_text(name)}")
         keyboard.append(
             InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
         )
@@ -616,7 +620,8 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(
         "\n".join(text),
         reply_markup=InlineKeyboardMarkup(final_keyboard),
-        parse_mode="HTML"
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 # =========================
@@ -678,12 +683,16 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = count_songs(search_query)
         rows = search_songs(search_query, offset=offset, limit=limit)
 
-        text = [f"🎵 <b>Kết quả:</b> {search_query}\n📊 Trang {page+1}"]
+        text = [f"🎵 <b>Kết quả:</b> {pretty_text(search_query)}\n📊 Trang {page+1}"]
 
         keyboard = []
 
         for i, (sid, name, mid, user) in enumerate(rows, offset + 1):
-            text.append(f"🎶 {i}. {name}")
+            link = build_stream_link(user, mid)
+            if link:
+                text.append(f"🎶 <b>{i}.</b> {pretty_text(name)}\n🔗 <a href=\"{html.escape(link)}\">Nghe bài này</a>")
+            else:
+                text.append(f"🎶 <b>{i}.</b> {pretty_text(name)}")
             keyboard.append(
                 InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
             )
@@ -701,7 +710,8 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "\n".join(text),
             reply_markup=InlineKeyboardMarkup(final_keyboard),
-            parse_mode="HTML"
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
 
         await q.answer()
