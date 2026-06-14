@@ -27,6 +27,8 @@ from telegram.ext import (
     filters,
 )
 
+from gdrive_sync import download_db, upload_db
+
 # =========================
 # KEEP ALIVE
 # =========================
@@ -50,6 +52,9 @@ WEB_URL = os.getenv("WEB_URL", "http://localhost:8080")
 DB_DIR = "/app/data"
 os.makedirs(DB_DIR, exist_ok=True)
 DB_PATH = os.path.join(DB_DIR, "music.db")
+
+# Try to restore the latest DB from Google Drive before opening it
+download_db(DB_PATH)
 
 db = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = db.cursor()
@@ -98,6 +103,15 @@ CREATE TABLE IF NOT EXISTS playlists(
 );
 """)
 db.commit()
+
+def sync_db():
+    """Push current DB file to Google Drive in a background thread (non-blocking)."""
+    def _run():
+        try:
+            upload_db(DB_PATH)
+        except Exception as e:
+            print("[GDRIVE] sync_db error:", e)
+    Thread(target=_run, daemon=True).start()
 
 # =========================
 # HELPERS
@@ -166,6 +180,7 @@ def build_track_message(query, rows, total, page=0):
         keyboard.append(nav)
 
     return "\n".join(lines), InlineKeyboardMarkup(keyboard) if keyboard else None
+
 def build_pagination_buttons(page, total, search_query, limit=5):
     keyboard = []
 
@@ -185,6 +200,7 @@ def build_pagination_buttons(page, total, search_query, limit=5):
         keyboard.append(nav)
 
     return keyboard
+
 # =========================
 # TOPIC LINKS
 # =========================
@@ -195,6 +211,7 @@ def add_topic_link(keyword, link):
         (keyword, link),
     )
     db.commit()
+    sync_db()
 
 def get_topic_link(keyword):
     keyword = clean_name(keyword)
@@ -208,10 +225,12 @@ def get_topic_link(keyword):
 def add_allowed_group(gid):
     cur.execute("INSERT OR IGNORE INTO allowed_groups(group_id) VALUES (?)", (gid,))
     db.commit()
+    sync_db()
 
 def remove_allowed_group(gid):
     cur.execute("DELETE FROM allowed_groups WHERE group_id=?", (gid,))
     db.commit()
+    sync_db()
 
 def get_allowed_groups():
     cur.execute("SELECT group_id FROM allowed_groups ORDER BY group_id")
@@ -229,6 +248,7 @@ def add_source(gid, tid=None):
         (gid, tid),
     )
     db.commit()
+    sync_db()
 
 def remove_source(gid, tid=None):
     cur.execute(
@@ -236,6 +256,7 @@ def remove_source(gid, tid=None):
         (gid, tid, tid),
     )
     db.commit()
+    sync_db()
 
 def is_source(gid, tid):
     if gid == MAIN_SOURCE_GROUP and tid == MAIN_SOURCE_TOPIC:
@@ -530,7 +551,7 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Dùng: /timtrack <tên>")
         return
 
-    query = " ".join(context.args)   # ✅ FIX QUAN TRỌNG
+    query = " ".join(context.args)
 
     log_search(query)
 
@@ -538,8 +559,9 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     page = 0
     limit = 5
+    offset = page * limit
 
-    rows = search_songs(query, limit)
+    rows = search_songs(query, offset=offset, limit=limit)
 
     text = [f"🎵 <b>Kết quả:</b> {query}\n📊 Tổng: {total} bài\n"]
 
@@ -566,6 +588,7 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(final_keyboard),
         parse_mode="HTML"
     )
+
 # =========================
 # /myplaylist
 # =========================
@@ -601,6 +624,7 @@ async def myplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n".join(lines),
         parse_mode="HTML",
         disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
     )
 
 # =========================
@@ -620,15 +644,15 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         search_query = data[2]
         limit = 5
         offset = page * limit
-    
+
         total = count_songs(search_query)
-        rows = search_songs(search_query, limit)
+        rows = search_songs(search_query, offset=offset, limit=limit)
 
         text = [f"🎵 <b>Kết quả:</b> {search_query}\n📊 Trang {page+1}"]
 
         keyboard = []
-    
-        for i, (sid, name, mid, user) in enumerate(rows, 1):
+
+        for i, (sid, name, mid, user) in enumerate(rows, offset + 1):
             text.append(f"🎶 {i}. {name}")
             keyboard.append(
                 InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
@@ -849,7 +873,7 @@ app.add_handler(CommandHandler("stats", stats))
 # Other handlers
 app.add_handler(InlineQueryHandler(inline_query_handler))
 app.add_handler(CallbackQueryHandler(button_router))
-app.add_handler(MessageHandler(filters.ALL, all_messages))
+app.add_handler(MessageHandler(filters.AUDIO, all_messages))
 app.add_error_handler(error_handler)
 
 print("BOT RUNNING")
