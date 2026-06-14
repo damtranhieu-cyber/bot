@@ -215,9 +215,22 @@ def add_topic_link(keyword, link):
 
 def get_topic_link(keyword):
     keyword = clean_name(keyword)
+    if not keyword:
+        return None
+
+    # Exact match first
     cur.execute("SELECT link FROM topic_links WHERE keyword=?", (keyword,))
     row = cur.fetchone()
-    return row[0] if row else None
+    if row:
+        return row[0]
+
+    # Fuzzy match: keyword contains a saved topic keyword, or vice versa
+    cur.execute("SELECT keyword, link FROM topic_links")
+    for kw, link in cur.fetchall():
+        if kw and (kw in keyword or keyword in kw):
+            return link
+
+    return None
 
 # =========================
 # GROUP / SOURCE SYSTEM
@@ -594,6 +607,10 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = search_songs(query, offset=offset, limit=limit)
 
     text = [f"🎵 <b>Kết quả:</b> {pretty_text(query)}\n📊 Tổng: {total} bài\n"]
+
+    topic_link = get_topic_link(query)
+    if topic_link:
+        text.append(f"📌 <b>Topic liên quan:</b> <a href=\"{html.escape(topic_link)}\">Xem topic</a>\n")
 
     keyboard = []
 
