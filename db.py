@@ -38,4 +38,11 @@ def init_db():
         link TEXT
     );
     """)
-    db.commit()
+     cur.executescript("""
+    CREATE TABLE IF NOT EXISTS stats(
+        key TEXT PRIMARY KEY,
+        value INTEGER DEFAULT 0
+    );
+    """)
+
+db.commit()
