@@ -523,37 +523,39 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # =========================
 # /timtrack
 # =========================
-page = 0
-limit = 5
+async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
 
-rows = search_songs(query, limit)
+    page = 0
+    limit = 5
 
-text = [f"🎵 <b>Kết quả:</b> {query}\n📊 Tổng: {total} bài\n"]
+    rows = search_songs(query, limit)
 
-keyboard = []
+    text = [f"🎵 <b>Kết quả:</b> {query}\n📊 Tổng: {total} bài\n"]
 
-for i, (sid, name, mid, user) in enumerate(rows, 1):
-    text.append(f"🎶 {i}. {name}")
-    keyboard.append(
-        InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
+    keyboard = []
+
+    for i, (sid, name, mid, user) in enumerate(rows, 1):
+        text.append(f"🎶 {i}. {name}")
+        keyboard.append(
+            InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
+        )
+
+    nav_buttons = build_pagination_buttons(page, total, query, limit)
+
+    final_keyboard = []
+
+    if keyboard:
+        final_keyboard.append(keyboard)
+
+    if nav_buttons:
+        final_keyboard.extend(nav_buttons)
+
+    await msg.reply_text(
+        "\n".join(text),
+        reply_markup=InlineKeyboardMarkup(final_keyboard),
+        parse_mode="HTML"
     )
-
-nav_buttons = build_pagination_buttons(page, total, query, limit)
-
-final_keyboard = []
-
-if keyboard:
-    final_keyboard.append(keyboard)
-
-if nav_buttons:
-    final_keyboard.extend(nav_buttons)
-
-await msg.reply_text(
-    "\n".join(text),
-    reply_markup=InlineKeyboardMarkup(final_keyboard),
-    parse_mode="HTML"
-)
-
 # =========================
 # /myplaylist
 # =========================
