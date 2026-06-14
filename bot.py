@@ -526,6 +526,16 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
 
+    if not context.args:
+        await msg.reply_text("Dùng: /timtrack <tên>")
+        return
+
+    query = " ".join(context.args)   # ✅ FIX QUAN TRỌNG
+
+    log_search(query)
+
+    total = count_songs(query)
+
     page = 0
     limit = 5
 
