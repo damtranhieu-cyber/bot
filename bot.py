@@ -103,6 +103,10 @@ CREATE TABLE IF NOT EXISTS playlists(
     song_id INTEGER,
     PRIMARY KEY(user_id, song_id)
 );
+
+CREATE TABLE IF NOT EXISTS admins(
+    user_id INTEGER PRIMARY KEY
+);
 """)
 db.commit()
 
@@ -139,6 +143,33 @@ def sync_db():
 # =========================
 def is_owner(update: Update):
     return bool(update.effective_user and update.effective_user.id == OWNER_ID)
+
+def add_admin(uid):
+    cur.execute("INSERT OR IGNORE INTO admins(user_id) VALUES (?)", (uid,))
+    db.commit()
+    sync_db()
+
+def remove_admin(uid):
+    cur.execute("DELETE FROM admins WHERE user_id=?", (uid,))
+    deleted = cur.rowcount > 0
+    db.commit()
+    if deleted:
+        sync_db()
+    return deleted
+
+def get_admins():
+    cur.execute("SELECT user_id FROM admins ORDER BY user_id")
+    return [r[0] for r in cur.fetchall()]
+
+def is_admin(update: Update):
+    uid = update.effective_user.id if update.effective_user else None
+    if uid is None:
+        return False
+    cur.execute("SELECT 1 FROM admins WHERE user_id=?", (uid,))
+    return cur.fetchone() is not None
+
+def is_owner_or_admin(update: Update):
+    return is_owner(update) or is_admin(update)
 
 def clean_name(text: str):
     if not text:
@@ -433,12 +464,16 @@ def api_stats():
     cur.execute("SELECT COUNT(*) FROM allowed_groups")
     groups = cur.fetchone()[0]
 
+    cur.execute("SELECT COUNT(*) FROM topic_links")
+    topics = cur.fetchone()[0]
+
     return jsonify({
         "songs": songs,
         "playlists": playlists,
         "searches": searches,
         "sources": sources,
         "groups": groups,
+        "topics": topics,
     })
 
 @flask_app.route("/api/top")
@@ -537,6 +572,7 @@ def dashboard():
             <div class="card"><p class="num" id="searches">0</p><p class="label">Từ khóa tìm</p></div>
             <div class="card"><p class="num" id="sources">0</p><p class="label">Sources</p></div>
             <div class="card"><p class="num" id="groups">0</p><p class="label">Group được cấp quyền</p></div>
+            <div class="card"><p class="num" id="topics">0</p><p class="label">Topics</p></div>
         </div>
 
         <div class="panel">
@@ -554,6 +590,7 @@ async function loadStats(){
     document.getElementById('searches').innerText = s.searches;
     document.getElementById('sources').innerText = s.sources;
     document.getElementById('groups').innerText = s.groups;
+    document.getElementById('topics').innerText = s.topics;
 
     const top = await fetch('/api/top').then(r => r.json());
     const ul = document.getElementById('toplist');
@@ -846,17 +883,22 @@ async def restoredb(update, context):
         await update.message.reply_text(f"❌ Lỗi khi khôi phục DB: {e}")
 
 async def settopic(update, context):
-    if not is_owner(update):
+    if not is_owner_or_admin(update):
         return
     text = update.message.text.replace("/settopic ", "", 1).strip()
-    if "|" not in text:
-        return await update.message.reply_text("ℹ️ Cú pháp: <code>/settopic &lt;từ khóa&gt; | &lt;link&gt;</code>", parse_mode="HTML")
-    keyword, link = text.split("|", 1)
-    add_topic_link(keyword.strip(), link.strip())
-    await update.message.reply_text(f"✅ Đã gán <b>{pretty_text(keyword.strip())}</b> vào topic.", parse_mode="HTML")
+
+    m = re.match(r'^"([^"]*)"\s*\|\s*"([^"]*)"$', text)
+    if not m:
+        return await update.message.reply_text(
+            'ℹ️ Cú pháp: <code>/settopic "&lt;từ khóa&gt;" | "&lt;link&gt;"</code>',
+            parse_mode="HTML",
+        )
+    keyword, link = m.group(1).strip(), m.group(2).strip()
+    add_topic_link(keyword, link)
+    await update.message.reply_text(f"✅ Đã gán <b>{pretty_text(keyword)}</b> vào topic.", parse_mode="HTML")
 
 async def deltrack(update, context):
-    if not is_owner(update):
+    if not is_owner_or_admin(update):
         return
     if not context.args:
         return await update.message.reply_text("ℹ️ Cú pháp: <code>/deltrack &lt;ID bài hát&gt;</code>", parse_mode="HTML")
@@ -872,7 +914,7 @@ async def deltrack(update, context):
         await update.message.reply_text(f"❌ Lỗi: {e}")
 
 async def addalias(update, context):
-    if not is_owner(update):
+    if not is_owner_or_admin(update):
         return
     text = update.message.text.replace("/addalias ", "", 1).strip()
     if "|" not in text:
@@ -900,7 +942,7 @@ async def addalias(update, context):
         await update.message.reply_text("⚠️ Bí danh không hợp lệ hoặc đã tồn tại")
 
 async def delalias(update, context):
-    if not is_owner(update):
+    if not is_owner_or_admin(update):
         return
     text = update.message.text.replace("/delalias ", "", 1).strip()
     if "|" not in text:
@@ -987,8 +1029,43 @@ async def listgroups(update, context):
     text = "📋 <b>ALLOWED GROUPS</b>\n\n" + "\n".join(map(str, groups))
     await update.message.reply_text(text, parse_mode="HTML")
 
-async def addsource(update, context):
+async def addadmin(update, context):
     if not is_owner(update):
+        return
+    if not context.args:
+        return await update.message.reply_text("ℹ️ Dùng: <code>/addadmin &lt;user_id&gt;</code>", parse_mode="HTML")
+    try:
+        uid = int(context.args[0])
+        add_admin(uid)
+        await update.message.reply_text(f"✅ Đã thêm admin <b>{uid}</b>", parse_mode="HTML")
+    except:
+        await update.message.reply_text("❌ user_id không hợp lệ")
+
+async def removeadmin(update, context):
+    if not is_owner(update):
+        return
+    if not context.args:
+        return await update.message.reply_text("ℹ️ Dùng: <code>/removeadmin &lt;user_id&gt;</code>", parse_mode="HTML")
+    try:
+        uid = int(context.args[0])
+        if remove_admin(uid):
+            await update.message.reply_text(f"✅ Đã bỏ admin <b>{uid}</b>", parse_mode="HTML")
+        else:
+            await update.message.reply_text(f"⚠️ <b>{uid}</b> không phải admin", parse_mode="HTML")
+    except:
+        await update.message.reply_text("❌ user_id không hợp lệ")
+
+async def listadmins(update, context):
+    if not is_owner(update):
+        return
+    admins = get_admins()
+    if not admins:
+        return await update.message.reply_text("📭 Chưa có admin nào.", parse_mode="HTML")
+    text = "👮 <b>ADMINS</b>\n\n" + "\n".join(map(str, admins))
+    await update.message.reply_text(text, parse_mode="HTML")
+
+async def addsource(update, context):
+    if not is_owner_or_admin(update):
         return
     if not context.args:
         return await update.message.reply_text("ℹ️ Dùng: <code>/addsource &lt;group_id&gt; [&lt;topic_id&gt;]</code>", parse_mode="HTML")
@@ -1001,7 +1078,7 @@ async def addsource(update, context):
         await update.message.reply_text("❌ group_id/topic_id không hợp lệ")
 
 async def removesource(update, context):
-    if not is_owner(update):
+    if not is_owner_or_admin(update):
         return
     if not context.args:
         return await update.message.reply_text("ℹ️ Dùng: <code>/removesource &lt;group_id&gt; [&lt;topic_id&gt;]</code>", parse_mode="HTML")
@@ -1016,7 +1093,7 @@ async def removesource(update, context):
         await update.message.reply_text("❌ group_id/topic_id không hợp lệ")
 
 async def listsources(update, context):
-    if not is_owner(update):
+    if not is_owner_or_admin(update):
         return
     rows = get_sources()
     text = f"📦 <b>MAIN SOURCE</b>\n{MAIN_SOURCE_GROUP} / topic={MAIN_SOURCE_TOPIC}\n\n"
@@ -1028,7 +1105,7 @@ async def listsources(update, context):
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def listtopics(update, context):
-    if not is_owner(update):
+    if not is_owner_or_admin(update):
         return
     cur.execute("SELECT keyword, link FROM topic_links ORDER BY keyword")
     rows = cur.fetchall()
@@ -1082,13 +1159,13 @@ async def ownerhelp(update, context):
         "/getdb — Lấy link/file database\n"
         "/restoredb — Khôi phục DB mới nhất từ Google Drive\n\n"
 
-        "🎵 <b>Bài hát</b>\n"
+        "🎵 <b>Bài hát</b> (owner + admin)\n"
         "/deltrack &lt;ID&gt; — Xóa bài hát\n"
         "/addalias &lt;ID&gt; | &lt;bí danh&gt; — Thêm bí danh tìm kiếm\n"
         "/delalias &lt;ID&gt; | &lt;bí danh&gt; — Xóa bí danh\n\n"
 
-        "📁 <b>Topic / Source</b>\n"
-        "/settopic &lt;từ khóa&gt; | &lt;link&gt; — Gán từ khóa vào topic\n"
+        "📁 <b>Topic / Source</b> (owner + admin)\n"
+        '/settopic "&lt;từ khóa&gt;" | "&lt;link&gt;" — Gán từ khóa vào topic\n'
         "/addsource &lt;group_id&gt; [topic_id] — Thêm nguồn lấy nhạc\n"
         "/removesource &lt;group_id&gt; [topic_id] — Xóa nguồn\n"
         "/listsources — Danh sách nguồn\n"
@@ -1099,12 +1176,40 @@ async def ownerhelp(update, context):
         "/removegroup &lt;group_id&gt; — Bỏ quyền group\n"
         "/listgroups — Danh sách group được cấp quyền\n\n"
 
+        "👮 <b>Admin</b>\n"
+        "/addadmin &lt;user_id&gt; — Thêm admin\n"
+        "/removeadmin &lt;user_id&gt; — Bỏ admin\n"
+        "/listadmins — Danh sách admin\n\n"
+
         "📊 <b>Thống kê &amp; thông báo</b>\n"
         "/stats — Thống kê bot\n"
         "/topnhac — Top từ khóa tìm kiếm\n"
         "/broadcast &lt;nội dung&gt; — Gửi thông báo tới tất cả group\n\n"
 
         "ℹ️ /ownerhelp — Hiện danh sách này"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+async def adminhelp(update, context):
+    if not is_owner_or_admin(update):
+        return
+
+    text = (
+        "🛠️ <b>ADMIN COMMANDS</b>\n\n"
+
+        "🎵 <b>Bài hát</b>\n"
+        "/deltrack &lt;ID&gt; — Xóa bài hát\n"
+        "/addalias &lt;ID&gt; | &lt;bí danh&gt; — Thêm bí danh tìm kiếm\n"
+        "/delalias &lt;ID&gt; | &lt;bí danh&gt; — Xóa bí danh\n\n"
+
+        "📁 <b>Topic / Source</b>\n"
+        '/settopic "&lt;từ khóa&gt;" | "&lt;link&gt;" — Gán từ khóa vào topic\n'
+        "/addsource &lt;group_id&gt; [topic_id] — Thêm nguồn lấy nhạc\n"
+        "/removesource &lt;group_id&gt; [topic_id] — Xóa nguồn\n"
+        "/listsources — Danh sách nguồn\n"
+        "/listtopics — Danh sách topic đã gán\n\n"
+
+        "ℹ️ /adminhelp — Hiện danh sách này"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -1121,6 +1226,8 @@ async def stats(update, context):
     sources = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM allowed_groups")
     groups = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM topic_links")
+    topics = cur.fetchone()[0]
 
     text = (
         "📊 <b>BOT STATS</b>\n\n"
@@ -1128,6 +1235,7 @@ async def stats(update, context):
         f"❤️ Playlist items: <b>{playlists}</b>\n"
         f"🔎 Search keywords: <b>{searches}</b>\n"
         f"📦 Sources: <b>{sources}</b>\n"
+        f"📌 Topics: <b>{topics}</b>\n"
         f"🛡️ Allowed groups: <b>{groups}</b>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
@@ -1194,6 +1302,9 @@ app.add_handler(CommandHandler("topnhac", topnhac))
 app.add_handler(CommandHandler("allowgroup", allowgroup))
 app.add_handler(CommandHandler("removegroup", removegroup))
 app.add_handler(CommandHandler("listgroups", listgroups))
+app.add_handler(CommandHandler("addadmin", addadmin))
+app.add_handler(CommandHandler("removeadmin", removeadmin))
+app.add_handler(CommandHandler("listadmins", listadmins))
 app.add_handler(CommandHandler("addsource", addsource))
 app.add_handler(CommandHandler("removesource", removesource))
 app.add_handler(CommandHandler("listsources", listsources))
@@ -1201,6 +1312,7 @@ app.add_handler(CommandHandler("listtopics", listtopics))
 app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CommandHandler("broadcast", broadcast))
 app.add_handler(CommandHandler("ownerhelp", ownerhelp))
+app.add_handler(CommandHandler("adminhelp", adminhelp))
 
 # Other handlers
 app.add_handler(InlineQueryHandler(inline_query_handler))
