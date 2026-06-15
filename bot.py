@@ -17,6 +17,7 @@ from telegram import (
     InlineQueryResultArticle,
     InputTextMessageContent,
 )
+from telegram.error import RetryAfter, BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -251,6 +252,32 @@ def get_topic_link(keyword):
             return link
 
     return None
+
+def get_topic_links(keyword):
+    """Return all (keyword, link) topic entries matching the search query."""
+    keyword = clean_name(keyword)
+    if not keyword:
+        return []
+
+    cur.execute("SELECT keyword, link FROM topic_links")
+    all_rows = cur.fetchall()
+
+    matches = []
+    seen_links = set()
+
+    # Exact matches first
+    for kw, link in all_rows:
+        if kw == keyword and link not in seen_links:
+            matches.append((kw, link))
+            seen_links.add(link)
+
+    # Then fuzzy matches
+    for kw, link in all_rows:
+        if kw != keyword and kw and (kw in keyword or keyword in kw) and link not in seen_links:
+            matches.append((kw, link))
+            seen_links.add(link)
+
+    return matches
 
 # =========================
 # GROUP / SOURCE SYSTEM
@@ -628,16 +655,20 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = [f"🎵 <b>Kết quả:</b> {pretty_text(query)}\n📊 Tổng: {total} bài\n"]
 
-    topic_link = get_topic_link(query)
-    if topic_link:
-        text.append(f"📌 <b>Topic liên quan:</b> <a href=\"{html.escape(topic_link)}\">Xem topic</a>\n")
+    topic_links = get_topic_links(query)
+    if topic_links:
+        text.append("━━━━━━━━━━━━━━━")
+        text.append("📌 <b>CHỦ ĐỀ LIÊN QUAN</b>")
+        for kw, link in topic_links:
+            text.append(f"👉 <a href=\"{html.escape(link)}\">{pretty_text(kw)}</a>")
+        text.append("━━━━━━━━━━━━━━━\n")
 
     keyboard = []
 
     for i, (sid, name, mid, user) in enumerate(rows, 1):
         link = build_stream_link(user, mid)
         if link:
-            text.append(f"🎶 <b>{i}.</b> {pretty_text(name)}\n🔗 <a href=\"{html.escape(link)}\">Nghe bài này</a>")
+            text.append(f"🎶 <b>{i}.</b> <a href=\"{html.escape(link)}\">{pretty_text(name)}</a>")
         else:
             text.append(f"🎶 <b>{i}.</b> {pretty_text(name)}")
         keyboard.append(
@@ -744,12 +775,19 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if nav_buttons:
             final_keyboard.extend(nav_buttons)
 
-        await q.edit_message_text(
-            "\n".join(text),
-            reply_markup=InlineKeyboardMarkup(final_keyboard),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        try:
+            await q.edit_message_text(
+                "\n".join(text),
+                reply_markup=InlineKeyboardMarkup(final_keyboard),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except RetryAfter as e:
+            await q.answer(f"⏳ Bấm chậm lại ({e.retry_after}s)", show_alert=False)
+            return
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise
 
         await q.answer()
         return
@@ -1105,6 +1143,11 @@ async def dashboard_cmd(update, context):
 # ERROR HANDLER
 # =========================
 async def error_handler(update, context):
+    # Don't try to notify on flood-control errors; that would just trigger more of them
+    if isinstance(context.error, RetryAfter):
+        print(f"[FLOOD] RetryAfter: retry in {context.error.retry_after}s")
+        return
+
     tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
     tb_string = "".join(tb_list)
 
