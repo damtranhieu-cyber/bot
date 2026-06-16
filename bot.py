@@ -4,7 +4,9 @@ import re
 import unicodedata
 import asyncio
 import html
+import time
 import traceback
+import threading
 from uuid import uuid4
 from threading import Thread
 
@@ -129,14 +131,32 @@ if _cols and not _has_id:
     db.commit()
     print("[MIGRATION] topic_links upgraded to multi-link schema")
 
-def sync_db():
-    """Push current DB file to Google Drive in a background thread (non-blocking)."""
-    def _run():
+_sync_flag = threading.Event()
+_sync_worker_started = False
+_sync_worker_lock = threading.Lock()
+
+def _sync_worker():
+    """Single long-lived background worker. Wakes up when sync_db() is called,
+    waits briefly to debounce bursts of consecutive calls, then uploads once."""
+    while True:
+        _sync_flag.wait()
+        _sync_flag.clear()
+        # Debounce: absorb a burst of consecutive sync_db() calls into one upload
+        time.sleep(15)
+        _sync_flag.clear()
         try:
             upload_db(DB_PATH)
         except Exception as e:
             print("[GDRIVE] sync_db error:", e)
-    Thread(target=_run, daemon=True).start()
+
+def sync_db():
+    """Request a Drive sync. Non-blocking; debounced and runs on a single shared thread."""
+    global _sync_worker_started
+    with _sync_worker_lock:
+        if not _sync_worker_started:
+            Thread(target=_sync_worker, daemon=True).start()
+            _sync_worker_started = True
+    _sync_flag.set()
 
 # =========================
 # HELPERS
@@ -882,6 +902,19 @@ async def restoredb(update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Lỗi khi khôi phục DB: {e}")
 
+async def forcesync(update, context):
+    if not is_owner_or_admin(update):
+        return
+    try:
+        await update.message.reply_text("⏳ Đang đẩy DB lên Google Drive...")
+        ok = await asyncio.to_thread(upload_db, DB_PATH)
+        if ok:
+            await update.message.reply_text("✅ Đã sync DB lên Google Drive.")
+        else:
+            await update.message.reply_text("⚠️ Sync thất bại hoặc Drive chưa được cấu hình.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Lỗi khi sync: {e}")
+
 async def settopic(update, context):
     if not is_owner_or_admin(update):
         return
@@ -1157,7 +1190,8 @@ async def ownerhelp(update, context):
 
         "📦 <b>Database</b>\n"
         "/getdb — Lấy link/file database\n"
-        "/restoredb — Khôi phục DB mới nhất từ Google Drive\n\n"
+        "/restoredb — Khôi phục DB mới nhất từ Google Drive\n"
+        "/forcesync — Đẩy DB lên Drive ngay (owner + admin)\n\n"
 
         "🎵 <b>Bài hát</b> (owner + admin)\n"
         "/deltrack &lt;ID&gt; — Xóa bài hát\n"
@@ -1208,6 +1242,9 @@ async def adminhelp(update, context):
         "/removesource &lt;group_id&gt; [topic_id] — Xóa nguồn\n"
         "/listsources — Danh sách nguồn\n"
         "/listtopics — Danh sách topic đã gán\n\n"
+
+        "📦 <b>Database</b>\n"
+        "/forcesync — Đẩy DB lên Google Drive ngay\n\n"
 
         "ℹ️ /adminhelp — Hiện danh sách này"
     )
@@ -1294,6 +1331,7 @@ app.add_handler(CommandHandler("aliases", aliases_cmd))
 # Owner commands
 app.add_handler(CommandHandler("getdb", getdb))
 app.add_handler(CommandHandler("restoredb", restoredb))
+app.add_handler(CommandHandler("forcesync", forcesync))
 app.add_handler(CommandHandler("settopic", settopic))
 app.add_handler(CommandHandler("deltrack", deltrack))
 app.add_handler(CommandHandler("addalias", addalias))
