@@ -7,6 +7,7 @@ import html
 import time
 import traceback
 import threading
+from datetime import datetime
 from uuid import uuid4
 from threading import Thread
 
@@ -109,6 +110,24 @@ CREATE TABLE IF NOT EXISTS playlists(
 CREATE TABLE IF NOT EXISTS admins(
     user_id INTEGER PRIMARY KEY
 );
+
+CREATE TABLE IF NOT EXISTS song_stats(
+    song_id INTEGER PRIMARY KEY,
+    search_hits INTEGER DEFAULT 0,
+    fav_hits INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS user_search_log(
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    count INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS failed_searches(
+    query TEXT PRIMARY KEY,
+    count INTEGER DEFAULT 0,
+    last_searched TEXT
+);
 """)
 db.commit()
 
@@ -190,6 +209,24 @@ def is_admin(update: Update):
 
 def is_owner_or_admin(update: Update):
     return is_owner(update) or is_admin(update)
+
+# =========================
+# ANTI-SPAM / COOLDOWN
+# =========================
+SEARCH_COOLDOWN_SECONDS = 3
+_last_search_time = {}
+_cooldown_lock = threading.Lock()
+
+def check_cooldown(user_id):
+    """Returns remaining cooldown seconds (0 if allowed to search now)."""
+    now = time.monotonic()
+    with _cooldown_lock:
+        last = _last_search_time.get(user_id, 0)
+        elapsed = now - last
+        if elapsed < SEARCH_COOLDOWN_SECONDS:
+            return SEARCH_COOLDOWN_SECONDS - elapsed
+        _last_search_time[user_id] = now
+        return 0
 
 def clean_name(text: str):
     if not text:
@@ -460,9 +497,70 @@ def log_search(query):
     cur.execute("UPDATE top_searches SET count = count + 1 WHERE query = ?", (q,))
     db.commit()
 
+def log_failed_search(query):
+    q = clean_name(query)
+    now = datetime.utcnow().isoformat()
+    cur.execute(
+        "INSERT INTO failed_searches(query, count, last_searched) VALUES (?, 0, ?) "
+        "ON CONFLICT(query) DO NOTHING",
+        (q, now),
+    )
+    cur.execute(
+        "UPDATE failed_searches SET count = count + 1, last_searched = ? WHERE query = ?",
+        (now, q),
+    )
+    db.commit()
+
+def log_user_search(user_id, username):
+    cur.execute(
+        "INSERT INTO user_search_log(user_id, username, count) VALUES (?, ?, 0) "
+        "ON CONFLICT(user_id) DO NOTHING",
+        (user_id, username or ""),
+    )
+    cur.execute(
+        "UPDATE user_search_log SET count = count + 1, username = ? WHERE user_id = ?",
+        (username or "", user_id),
+    )
+    db.commit()
+
+def get_failed_searches(limit=10):
+    cur.execute("SELECT query, count, last_searched FROM failed_searches ORDER BY count DESC LIMIT ?", (limit,))
+    return cur.fetchall()
+
+def get_leaderboard(limit=10):
+    cur.execute("SELECT user_id, username, count FROM user_search_log ORDER BY count DESC LIMIT ?", (limit,))
+    return cur.fetchall()
+
+def bump_song_stat(song_id, search=False, fav=False):
+    cur.execute("INSERT OR IGNORE INTO song_stats(song_id, search_hits, fav_hits) VALUES (?, 0, 0)", (song_id,))
+    if search:
+        cur.execute("UPDATE song_stats SET search_hits = search_hits + 1 WHERE song_id=?", (song_id,))
+    if fav:
+        cur.execute("UPDATE song_stats SET fav_hits = fav_hits + 1 WHERE song_id=?", (song_id,))
+
+def get_trending_songs(limit=10):
+    cur.execute("""
+        SELECT s.id, s.name, s.message_id, s.source_username,
+               (COALESCE(st.search_hits, 0) + COALESCE(st.fav_hits, 0) * 3) AS score
+        FROM songs s
+        LEFT JOIN song_stats st ON s.id = st.song_id
+        WHERE COALESCE(st.search_hits, 0) + COALESCE(st.fav_hits, 0) > 0
+        ORDER BY score DESC
+        LIMIT ?
+    """, (limit,))
+    return cur.fetchall()
+
 def add_to_playlist(uid, sid):
     cur.execute("INSERT OR IGNORE INTO playlists(user_id, song_id) VALUES (?, ?)", (uid, sid))
+    if cur.rowcount > 0:
+        bump_song_stat(sid, fav=True)
     db.commit()
+
+def remove_from_playlist(uid, sid):
+    cur.execute("DELETE FROM playlists WHERE user_id=? AND song_id=?", (uid, sid))
+    deleted = cur.rowcount > 0
+    db.commit()
+    return deleted
 
 # =========================
 # DASHBOARD
@@ -644,7 +742,11 @@ async def all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     topic_id = getattr(msg, "message_thread_id", None)
-    if not is_source(msg.chat.id, topic_id):
+
+    # Bulk import mode: owner/admin forwarding/sending audio directly to the bot (private chat)
+    is_bulk_import = msg.chat.type == "private" and is_owner_or_admin(update)
+
+    if not is_bulk_import and not is_source(msg.chat.id, topic_id):
         return
 
     if msg.audio.duration < 30:
@@ -653,8 +755,29 @@ async def all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     name = clean_name(msg.audio.file_name or msg.audio.title or "unknown")
-    username = msg.chat.username or "unknown"
 
+    if is_bulk_import:
+        # Forwarded audio in DM: link back to original source if it was forwarded from a public chat,
+        # otherwise fall back to the bot's own chat (file still playable via file_id in Telegram clients
+        # that support it, but we store what we can for consistency).
+        origin = getattr(msg, "forward_origin", None)
+        if origin and hasattr(origin, "chat") and getattr(origin.chat, "username", None):
+            gid = origin.chat.id
+            username = origin.chat.username
+            mid = getattr(origin, "message_id", msg.message_id)
+        else:
+            gid = msg.chat.id
+            username = msg.chat.username or "unknown"
+            mid = msg.message_id
+
+        if save_song(name, mid, gid, username):
+            print("[BULK IMPORT]", name)
+            await msg.reply_text(f"✅ Đã lưu: {pretty_text(name)}")
+        else:
+            await msg.reply_text(f"⚠️ Đã tồn tại: {pretty_text(name)}")
+        return
+
+    username = msg.chat.username or "unknown"
     if save_song(name, msg.message_id, msg.chat.id, username):
         print("[SAVED]", name)
 
@@ -693,14 +816,21 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # =========================
 async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    user = update.effective_user
 
     if not context.args:
         await msg.reply_text("Dùng: /timtrack <tên>")
         return
 
+    cooldown_left = check_cooldown(user.id) if not is_owner_or_admin(update) else 0
+    if cooldown_left > 0:
+        await msg.reply_text(f"⏳ Vui lòng chờ {cooldown_left:.1f}s trước khi tìm tiếp.")
+        return
+
     query = " ".join(context.args)
 
     log_search(query)
+    log_user_search(user.id, user.username or user.first_name or "")
 
     total = count_songs(query)
 
@@ -709,6 +839,9 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     offset = page * limit
 
     rows = search_songs(query, offset=offset, limit=limit)
+
+    if total == 0:
+        log_failed_search(query)
 
     text = [f"🎵 <b>Kết quả:</b> {pretty_text(query)}\n📊 Tổng: {total} bài\n"]
 
@@ -722,8 +855,9 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = []
 
-    for i, (sid, name, mid, user) in enumerate(rows, 1):
-        link = build_stream_link(user, mid)
+    for i, (sid, name, mid, user_n) in enumerate(rows, 1):
+        bump_song_stat(sid, search=True)
+        link = build_stream_link(user_n, mid)
         if link:
             text.append(f"🎶 <b>{i}.</b> <a href=\"{html.escape(link)}\">{pretty_text(name)}</a>")
         else:
@@ -731,6 +865,7 @@ async def timtrack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(
             InlineKeyboardButton(f"❤️ {i}", callback_data=f"fav|{sid}")
         )
+    db.commit()
 
     nav_buttons = build_pagination_buttons(page, total, query, limit)
 
@@ -776,9 +911,14 @@ async def myplaylist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = build_stream_link(user, mid)
         if link:
             lines.append(f"<b>{i}.</b> {pretty_text(name)}\n🔗 <a href=\"{html.escape(link)}\">Nghe bài này</a>")
-            keyboard.append([InlineKeyboardButton(f"🎧 {i}", url=link)])
         else:
             lines.append(f"<b>{i}.</b> {pretty_text(name)}")
+
+        row_buttons = []
+        if link:
+            row_buttons.append(InlineKeyboardButton(f"🎧 {i}", url=link))
+        row_buttons.append(InlineKeyboardButton(f"🗑️ Xóa {i}", callback_data=f"delfav|{sid}"))
+        keyboard.append(row_buttons)
 
     await update.message.reply_text(
         "\n".join(lines),
@@ -797,6 +937,14 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data[0] == "fav":
         add_to_playlist(q.from_user.id, int(data[1]))
         await q.answer("❤️ Đã thêm vào /myplaylist", show_alert=False)
+        return
+
+    if data[0] == "delfav":
+        removed = remove_from_playlist(q.from_user.id, int(data[1]))
+        if removed:
+            await q.answer("🗑️ Đã xóa khỏi playlist", show_alert=False)
+        else:
+            await q.answer("⚠️ Bài này không có trong playlist", show_alert=False)
         return
 
     if data[0] == "page":
@@ -1029,6 +1177,50 @@ async def topnhac(update, context):
         text += f"{i}. {pretty_text(q)} — <b>{c}</b> lượt\n"
     await update.message.reply_text(text, parse_mode="HTML")
 
+async def trending(update, context):
+    rows = get_trending_songs(10)
+    if not rows:
+        return await update.message.reply_text("😴 Chưa có dữ liệu trending.", parse_mode="HTML")
+
+    text = ["🔥 <b>TRENDING / HOT TRACKS</b>\n"]
+    for i, (sid, name, mid, user, score) in enumerate(rows, 1):
+        link = build_stream_link(user, mid)
+        if link:
+            text.append(f"<b>{i}.</b> <a href=\"{html.escape(link)}\">{pretty_text(name)}</a> — 🔥 {score} điểm")
+        else:
+            text.append(f"<b>{i}.</b> {pretty_text(name)} — 🔥 {score} điểm")
+
+    await update.message.reply_text(
+        "\n".join(text), parse_mode="HTML", disable_web_page_preview=True
+    )
+
+async def leaderboard(update, context):
+    rows = get_leaderboard(10)
+    if not rows:
+        return await update.message.reply_text("😴 Chưa có dữ liệu xếp hạng.", parse_mode="HTML")
+
+    medals = ["🥇", "🥈", "🥉"]
+    text = ["🏆 <b>LEADERBOARD - TÌM KIẾM NHIỀU NHẤT</b>\n"]
+    for i, (uid, uname, count) in enumerate(rows, 1):
+        prefix = medals[i - 1] if i <= 3 else f"{i}."
+        display = pretty_text(uname) if uname else str(uid)
+        text.append(f"{prefix} {display} — <b>{count}</b> lượt tìm")
+
+    await update.message.reply_text("\n".join(text), parse_mode="HTML")
+
+async def failedsearches(update, context):
+    if not is_owner_or_admin(update):
+        return
+    rows = get_failed_searches(15)
+    if not rows:
+        return await update.message.reply_text("😴 Chưa có tìm kiếm thất bại nào.", parse_mode="HTML")
+
+    text = ["❌ <b>TÌM KIẾM KHÔNG RA KẾT QUẢ</b>\n"]
+    for i, (q, count, last) in enumerate(rows, 1):
+        text.append(f"{i}. {pretty_text(q)} — <b>{count}</b> lần")
+
+    await update.message.reply_text("\n".join(text), parse_mode="HTML")
+
 async def allowgroup(update, context):
     if not is_owner(update):
         return
@@ -1196,7 +1388,8 @@ async def ownerhelp(update, context):
         "🎵 <b>Bài hát</b> (owner + admin)\n"
         "/deltrack &lt;ID&gt; — Xóa bài hát\n"
         "/addalias &lt;ID&gt; | &lt;bí danh&gt; — Thêm bí danh tìm kiếm\n"
-        "/delalias &lt;ID&gt; | &lt;bí danh&gt; — Xóa bí danh\n\n"
+        "/delalias &lt;ID&gt; | &lt;bí danh&gt; — Xóa bí danh\n"
+        "📥 Gửi/forward file audio trực tiếp cho bot (chat riêng) — Import hàng loạt\n\n"
 
         "📁 <b>Topic / Source</b> (owner + admin)\n"
         '/settopic "&lt;từ khóa&gt;" | "&lt;link&gt;" — Gán từ khóa vào topic\n'
@@ -1218,6 +1411,9 @@ async def ownerhelp(update, context):
         "📊 <b>Thống kê &amp; thông báo</b>\n"
         "/stats — Thống kê bot\n"
         "/topnhac — Top từ khóa tìm kiếm\n"
+        "/trending — Bài hát hot nhất\n"
+        "/leaderboard — Xếp hạng người tìm kiếm nhiều nhất\n"
+        "/failedsearches — Từ khóa tìm không ra kết quả\n"
         "/broadcast &lt;nội dung&gt; — Gửi thông báo tới tất cả group\n\n"
 
         "ℹ️ /ownerhelp — Hiện danh sách này"
@@ -1234,7 +1430,8 @@ async def adminhelp(update, context):
         "🎵 <b>Bài hát</b>\n"
         "/deltrack &lt;ID&gt; — Xóa bài hát\n"
         "/addalias &lt;ID&gt; | &lt;bí danh&gt; — Thêm bí danh tìm kiếm\n"
-        "/delalias &lt;ID&gt; | &lt;bí danh&gt; — Xóa bí danh\n\n"
+        "/delalias &lt;ID&gt; | &lt;bí danh&gt; — Xóa bí danh\n"
+        "📥 Gửi/forward file audio trực tiếp cho bot (chat riêng) — Import hàng loạt\n\n"
 
         "📁 <b>Topic / Source</b>\n"
         '/settopic "&lt;từ khóa&gt;" | "&lt;link&gt;" — Gán từ khóa vào topic\n'
@@ -1242,6 +1439,9 @@ async def adminhelp(update, context):
         "/removesource &lt;group_id&gt; [topic_id] — Xóa nguồn\n"
         "/listsources — Danh sách nguồn\n"
         "/listtopics — Danh sách topic đã gán\n\n"
+
+        "📊 <b>Thống kê</b>\n"
+        "/failedsearches — Từ khóa tìm không ra kết quả\n\n"
 
         "📦 <b>Database</b>\n"
         "/forcesync — Đẩy DB lên Google Drive ngay\n\n"
@@ -1327,6 +1527,8 @@ app.add_handler(CommandHandler("timtrack", timtrack))
 app.add_handler(CommandHandler("myplaylist", myplaylist))
 app.add_handler(CommandHandler("dashboard", dashboard_cmd))
 app.add_handler(CommandHandler("aliases", aliases_cmd))
+app.add_handler(CommandHandler("trending", trending))
+app.add_handler(CommandHandler("leaderboard", leaderboard))
 
 # Owner commands
 app.add_handler(CommandHandler("getdb", getdb))
@@ -1337,6 +1539,7 @@ app.add_handler(CommandHandler("deltrack", deltrack))
 app.add_handler(CommandHandler("addalias", addalias))
 app.add_handler(CommandHandler("delalias", delalias))
 app.add_handler(CommandHandler("topnhac", topnhac))
+app.add_handler(CommandHandler("failedsearches", failedsearches))
 app.add_handler(CommandHandler("allowgroup", allowgroup))
 app.add_handler(CommandHandler("removegroup", removegroup))
 app.add_handler(CommandHandler("listgroups", listgroups))
